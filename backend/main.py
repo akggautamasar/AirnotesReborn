@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Dict
 from contextlib import asynccontextmanager
@@ -20,6 +21,26 @@ logger = Logger(__name__)
 file_cache: Dict[str, Dict] = {}
 security = HTTPBearer(auto_error=False)
 
+# ─── Folder system (persisted as JSON) ─────────────────────────────────
+FOLDERS_FILE = Path("./cache/folders.json")
+FOLDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+folder_db: Dict = {"folders": {}, "file_assignments": {}}
+
+def _save_folders():
+    with open(FOLDERS_FILE, "w") as f:
+        json.dump(folder_db, f, indent=2)
+
+def _load_folders():
+    global folder_db
+    if FOLDERS_FILE.exists():
+        try:
+            with open(FOLDERS_FILE) as f:
+                folder_db = json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load folders: {e}")
+
+# ─── Cache refresh state ────────────────────────────────────────────────
 _refresh_lock = asyncio.Lock()
 _refresh_in_progress = False
 _last_refresh: datetime = None
@@ -33,39 +54,26 @@ VIDEO_MIMES = {
 }
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts", ".mpeg"}
 
-
 def is_video(mime: str, fname: str) -> bool:
-    if mime in VIDEO_MIMES:
-        return True
+    if mime in VIDEO_MIMES: return True
     return Path(fname).suffix.lower() in VIDEO_EXTS
-
 
 def is_pdf(mime: str, fname: str) -> bool:
     return mime == "application/pdf" or fname.lower().endswith(".pdf")
 
-
 def file_type(mime: str, fname: str) -> str:
-    if is_video(mime, fname):
-        return "video"
-    if is_pdf(mime, fname):
-        return "pdf"
+    if is_video(mime, fname): return "video"
+    if is_pdf(mime, fname): return "pdf"
     return "other"
-
 
 def create_jwt(data: dict, expires_hours: int = 24 * 7) -> str:
     payload = {**data, "exp": datetime.utcnow() + timedelta(hours=expires_hours)}
     return pyjwt.encode(payload, config.JWT_SECRET, algorithm="HS256")
 
-
 def verify_jwt(token: str) -> dict:
     return pyjwt.decode(token, config.JWT_SECRET, algorithms=["HS256"])
 
-
-async def require_auth(
-    request: Request,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-):
-    """Auth via Bearer header OR ?token= query param (for HTML <video> tags)."""
+async def require_auth(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = None
     if credentials and credentials.credentials:
         token = credentials.credentials
@@ -83,6 +91,7 @@ async def require_auth(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _load_folders()
     await initialize_clients()
     asyncio.create_task(refresh_file_cache())
     asyncio.create_task(_periodic_refresh())
@@ -90,7 +99,7 @@ async def lifespan(app: FastAPI):
         from bot_handler import setup_bot_handlers
         from utils.clients import multi_clients
         for client in multi_clients.values():
-            setup_bot_handlers(client, file_cache)
+            setup_bot_handlers(client, file_cache, folder_db, _save_folders)
             logger.info("Bot handlers registered")
             break
     except Exception as e:
@@ -101,20 +110,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AirNotes 2.0", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
 
 
 async def refresh_file_cache():
-    """Rebuild cache — PDFs + Videos — up to 10k messages, lock-protected."""
     global file_cache, _refresh_in_progress, _last_refresh
     if _refresh_in_progress:
-        logger.info("Refresh already in progress, skipping")
         return
     async with _refresh_lock:
         _refresh_in_progress = True
@@ -135,7 +137,6 @@ async def refresh_file_cache():
                 except Exception:
                     pass
             start_id = max(1, upper_id - FULL_SCAN_LIMIT)
-            logger.info(f"Cache scan: msg range {start_id}-{upper_id}")
             for batch_start in range(upper_id, start_id - 1, -200):
                 batch_end = max(batch_start - 199, start_id)
                 ids = list(range(batch_start, batch_end - 1, -1))
@@ -157,14 +158,10 @@ async def refresh_file_cache():
                         continue
                     key = f"msg_{message.id}"
                     new_cache[key] = {
-                        "id": key,
-                        "message_id": message.id,
-                        "name": fname,
+                        "id": key, "message_id": message.id, "name": fname,
                         "size": getattr(media, "file_size", 0),
                         "date": message.date.timestamp() if message.date else 0,
-                        "caption": message.caption or "",
-                        "type": ftype,
-                        "mime": mime,
+                        "caption": message.caption or "", "type": ftype, "mime": mime,
                     }
                 await asyncio.sleep(0.1)
             file_cache = new_cache
@@ -182,24 +179,19 @@ async def _periodic_refresh():
     await asyncio.sleep(90)
     while True:
         await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
-        logger.info("Periodic cache refresh triggered")
         await refresh_file_cache()
 
+
+# ── Auth ────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 @app.head("/health")
 async def health():
     pdfs = sum(1 for f in file_cache.values() if f.get("type") == "pdf")
     videos = sum(1 for f in file_cache.values() if f.get("type") == "video")
-    return {
-        "status": "ok",
-        "files_cached": len(file_cache),
-        "pdfs": pdfs,
-        "videos": videos,
-        "last_refresh": _last_refresh.isoformat() if _last_refresh else None,
-        "refresh_in_progress": _refresh_in_progress,
-    }
-
+    return {"status": "ok", "files_cached": len(file_cache), "pdfs": pdfs, "videos": videos,
+            "last_refresh": _last_refresh.isoformat() if _last_refresh else None,
+            "refresh_in_progress": _refresh_in_progress}
 
 @app.post("/api/auth/login")
 async def login(request: Request):
@@ -208,26 +200,25 @@ async def login(request: Request):
         raise HTTPException(status_code=401, detail="Invalid password")
     return {"token": create_jwt({"authenticated": True}), "message": "Login successful"}
 
-
 @app.get("/api/auth/verify")
 async def verify(user=Depends(require_auth)):
     return {"valid": True}
 
 
+# ── Files ───────────────────────────────────────────────────────────────
+
 @app.get("/api/files")
-async def list_files(type: str = None, user=Depends(require_auth)):
-    """Returns cache instantly. Supports ?type=pdf or ?type=video."""
+async def list_files(type: str = None, folder_id: str = None, user=Depends(require_auth)):
     files = list(file_cache.values())
     if type in ("pdf", "video"):
         files = [f for f in files if f.get("type") == type]
+    if folder_id is not None:
+        assignments = folder_db.get("file_assignments", {})
+        files = [f for f in files if assignments.get(f["id"]) == folder_id]
     files.sort(key=lambda f: f["date"], reverse=True)
-    return {
-        "files": files,
-        "total": len(files),
-        "last_refresh": _last_refresh.isoformat() if _last_refresh else None,
-        "refresh_in_progress": _refresh_in_progress,
-    }
-
+    return {"files": files, "total": len(files),
+            "last_refresh": _last_refresh.isoformat() if _last_refresh else None,
+            "refresh_in_progress": _refresh_in_progress}
 
 @app.get("/api/files/{file_id}/stream")
 async def stream_file(file_id: str, request: Request, user=Depends(require_auth)):
@@ -238,15 +229,11 @@ async def stream_file(file_id: str, request: Request, user=Depends(require_auth)
     info = file_cache[file_id]
     return await media_streamer(config.STORAGE_CHANNEL, info["message_id"], info["name"], request)
 
-
 @app.options("/api/files/{file_id}/stream")
 async def stream_options(file_id: str):
-    return Response(headers={
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-        "Access-Control-Allow-Headers": "Authorization, Range",
-    })
-
+    return Response(headers={"Access-Control-Allow-Origin": "*",
+                              "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                              "Access-Control-Allow-Headers": "Authorization, Range"})
 
 @app.delete("/api/files/{file_id}")
 async def delete_file(file_id: str, user=Depends(require_auth)):
@@ -257,10 +244,11 @@ async def delete_file(file_id: str, user=Depends(require_auth)):
         client = get_client()
         await client.delete_messages(config.STORAGE_CHANNEL, info["message_id"])
         del file_cache[file_id]
+        folder_db["file_assignments"].pop(file_id, None)
+        _save_folders()
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
-
 
 @app.patch("/api/files/{file_id}/rename")
 async def rename_file(file_id: str, request: Request, user=Depends(require_auth)):
@@ -276,7 +264,6 @@ async def rename_file(file_id: str, request: Request, user=Depends(require_auth)
         name += ext
     file_cache[file_id]["name"] = name
     return {"success": True, "file": file_cache[file_id]}
-
 
 @app.post("/api/files/{file_id}/copy")
 async def copy_file(file_id: str, user=Depends(require_auth)):
@@ -294,13 +281,10 @@ async def copy_file(file_id: str, user=Depends(require_auth)):
         stem = Path(info["name"]).stem
         ext = Path(info["name"]).suffix
         file_cache[new_key] = {
-            "id": new_key,
-            "message_id": copied.id,
-            "name": f"{stem} (copy){ext}",
-            "size": info["size"],
+            "id": new_key, "message_id": copied.id,
+            "name": f"{stem} (copy){ext}", "size": info["size"],
             "date": copied.date.timestamp() if copied.date else info["date"],
-            "caption": info["caption"],
-            "type": info.get("type", "pdf"),
+            "caption": info["caption"], "type": info.get("type", "pdf"),
             "mime": info.get("mime", ""),
         }
         return {"success": True, "file": file_cache[new_key]}
@@ -309,28 +293,94 @@ async def copy_file(file_id: str, user=Depends(require_auth)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
 
+@app.post("/api/files/{file_id}/move")
+async def move_file(file_id: str, request: Request, user=Depends(require_auth)):
+    if file_id not in file_cache:
+        raise HTTPException(status_code=404, detail="File not found")
+    body = await request.json()
+    folder_id = body.get("folder_id")
+    if folder_id is None:
+        folder_db["file_assignments"].pop(file_id, None)
+    else:
+        if folder_id not in folder_db["folders"]:
+            raise HTTPException(status_code=404, detail="Folder not found")
+        folder_db["file_assignments"][file_id] = folder_id
+    _save_folders()
+    return {"success": True, "file_id": file_id, "folder_id": folder_id}
 
 @app.get("/api/search")
 async def search(q: str = "", type: str = None, user=Depends(require_auth)):
     if not q:
         return {"files": []}
     query = q.lower()
-    results = [
-        f for f in file_cache.values()
-        if query in f["name"].lower() or query in f["caption"].lower()
-    ]
+    results = [f for f in file_cache.values()
+               if query in f["name"].lower() or query in f["caption"].lower()]
     if type in ("pdf", "video"):
         results = [f for f in results if f.get("type") == type]
     return {"files": results, "query": q}
-
 
 @app.post("/api/files/refresh")
 async def force_refresh(user=Depends(require_auth)):
     if _refresh_in_progress:
         return {"message": "Refresh already in progress", "files_cached": len(file_cache)}
     asyncio.create_task(refresh_file_cache())
-    return {
-        "message": "Refresh started in background",
-        "files_cached": len(file_cache),
-        "hint": "Poll GET /api/files — refresh_in_progress turns false when done",
-    }
+    return {"message": "Refresh started in background", "files_cached": len(file_cache)}
+
+
+# ── Folders ─────────────────────────────────────────────────────────────
+
+@app.get("/api/folders")
+async def list_folders(user=Depends(require_auth)):
+    folders = list(folder_db["folders"].values())
+    assignments = folder_db.get("file_assignments", {})
+    for folder in folders:
+        folder["file_count"] = sum(1 for v in assignments.values() if v == folder["id"])
+    return {"folders": folders}
+
+@app.post("/api/folders")
+async def create_folder_api(request: Request, user=Depends(require_auth)):
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Folder name required")
+    import uuid
+    folder_id = str(uuid.uuid4())[:8]
+    folder = {"id": folder_id, "name": name, "parent_id": body.get("parent_id"),
+              "created_at": datetime.utcnow().isoformat()}
+    folder_db["folders"][folder_id] = folder
+    _save_folders()
+    return {"success": True, "folder": folder}
+
+@app.patch("/api/folders/{folder_id}")
+async def rename_folder_api(folder_id: str, request: Request, user=Depends(require_auth)):
+    if folder_id not in folder_db["folders"]:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name required")
+    folder_db["folders"][folder_id]["name"] = name
+    _save_folders()
+    return {"success": True, "folder": folder_db["folders"][folder_id]}
+
+@app.delete("/api/folders/{folder_id}")
+async def delete_folder(folder_id: str, user=Depends(require_auth)):
+    if folder_id not in folder_db["folders"]:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    assignments = folder_db["file_assignments"]
+    for fid in list(assignments.keys()):
+        if assignments[fid] == folder_id:
+            del assignments[fid]
+    del folder_db["folders"][folder_id]
+    _save_folders()
+    return {"success": True}
+
+@app.get("/api/folders/{folder_id}/files")
+async def get_folder_files(folder_id: str, user=Depends(require_auth)):
+    if folder_id not in folder_db["folders"]:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    assignments = folder_db.get("file_assignments", {})
+    file_ids = [fid for fid, vid in assignments.items() if vid == folder_id]
+    files = [file_cache[fid] for fid in file_ids if fid in file_cache]
+    files.sort(key=lambda f: f["date"], reverse=True)
+    return {"files": files, "folder": folder_db["folders"][folder_id]}
