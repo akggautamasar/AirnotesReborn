@@ -4,6 +4,7 @@ import { api } from '../utils/api';
 import Sidebar from '../components/Sidebar';
 import LibraryView from '../components/library/LibraryView';
 import PDFReader from '../components/reader/PDFReader';
+import VideoPlayer from '../components/reader/VideoPlayer';
 import SearchModal from '../components/ui/SearchModal';
 import { Menu, X } from 'lucide-react';
 
@@ -29,6 +30,11 @@ export default function MainApp() {
 
   // Close sidebar on route change
   useEffect(() => { setSidebarOpen(false); }, [state.activeSection, state.activeFolderId]);
+
+  // Determine which viewer to show
+  const openedFileType = state.openFile?.type || 'pdf';
+  const showPDF = state.openFile && openedFileType === 'pdf';
+  const showVideo = state.openFile && openedFileType === 'video';
 
   return (
     <div className="h-screen flex overflow-hidden bg-ink-950">
@@ -67,7 +73,11 @@ export default function MainApp() {
         <LibraryView />
       </div>
 
-      {state.openFile && <PDFReader />}
+      {/* PDF Reader — full-screen overlay */}
+      {showPDF && <PDFReader />}
+
+      {/* Video Player — full-screen overlay */}
+      {showVideo && <VideoPlayer />}
 
       {showSearch && !state.openFile && (
         <SearchModal onClose={() => setShowSearch(false)} />
