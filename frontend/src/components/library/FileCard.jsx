@@ -1,19 +1,24 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { FileText, MoreVertical, FolderPlus, FolderMinus, Clock, Trash2, Pencil, Copy, Check, X } from 'lucide-react';
+import { FileText, Film, MoreVertical, FolderPlus, FolderMinus, Clock, Trash2, Pencil, Copy, Check, X } from 'lucide-react';
 import { useApp } from '../../store/AppContext';
 import { formatSize, formatRelativeDate, cleanFileName, getInitials, stringToColor } from '../../utils/format';
 import { folderStore, recentStore } from '../../utils/storage';
 import { api } from '../../utils/api';
+
+function isVideoFile(file) {
+  return file.type === 'video';
+}
 
 export default function FileCard({ file, progress, listMode = false }) {
   const { state, actions } = useApp();
   const [showMenu, setShowMenu] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
-  const [loading, setLoading] = useState(null); // 'delete' | 'copy' | 'rename'
+  const [loading, setLoading] = useState(null);
   const menuRef = useRef(null);
   const renameRef = useRef(null);
 
+  const isVideo = isVideoFile(file);
   const title = cleanFileName(file.name);
   const initials = getInitials(file.name);
   const color = stringToColor(file.name);
@@ -100,6 +105,16 @@ export default function FileCard({ file, progress, listMode = false }) {
   const availableFolders = state.folders.filter(f => f.id !== currentFolder);
   const busy = loading !== null;
 
+  // ── File type badge ──────────────────────────────────────────────────────
+  const TypeBadge = () => (
+    <div className="flex items-center justify-center gap-1 text-white/60">
+      {isVideo
+        ? <><Film size={10} /><span className="text-[9px] font-mono">VIDEO</span></>
+        : <><FileText size={10} /><span className="text-[9px] font-mono">PDF</span></>
+      }
+    </div>
+  );
+
   if (listMode) {
     return (
       <div
@@ -109,10 +124,15 @@ export default function FileCard({ file, progress, listMode = false }) {
         onClick={renaming ? undefined : openFile}
       >
         <div
-          className="w-8 h-10 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-bold text-white"
+          className="w-8 h-10 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-bold text-white relative"
           style={{ background: color }}
         >
           {busy ? <span className="animate-pulse text-base">⏳</span> : initials}
+          {isVideo && (
+            <span className="absolute -bottom-1 -right-1 bg-ink-900 rounded-full p-0.5">
+              <Film size={8} className="text-blue-400" />
+            </span>
+          )}
         </div>
 
         <div className="flex-1 min-w-0">
@@ -137,6 +157,12 @@ export default function FileCard({ file, progress, listMode = false }) {
               <p className="text-ink-500 text-xs truncate hidden md:block">{file.caption || file.name}</p>
             </>
           )}
+        </div>
+
+        {/* Type badge */}
+        <div className="hidden sm:flex items-center gap-1 text-ink-600 text-[10px] flex-shrink-0">
+          {isVideo ? <Film size={10} className="text-blue-500/70" /> : <FileText size={10} className="text-ink-500" />}
+          <span>{isVideo ? 'Video' : 'PDF'}</span>
         </div>
 
         <div className="w-16 md:w-20 text-right text-ink-500 text-xs flex-shrink-0 hidden sm:block">
@@ -188,18 +214,29 @@ export default function FileCard({ file, progress, listMode = false }) {
     >
       <div
         className="h-32 md:h-36 flex items-center justify-center relative"
-        style={{ background: `linear-gradient(135deg, ${color}cc, ${color}66)` }}
+        style={{ background: isVideo
+          ? `linear-gradient(135deg, #1e3a5f, #0f2040)`
+          : `linear-gradient(135deg, ${color}cc, ${color}66)` }}
       >
         <div className="absolute inset-0 opacity-10"
           style={{ backgroundImage: 'repeating-linear-gradient(45deg,#fff 0,#fff 1px,transparent 0,transparent 50%)', backgroundSize: '8px 8px' }} />
 
         <div className="relative text-center px-2">
-          <div className="text-3xl md:text-4xl font-bold text-white/90 font-display leading-none mb-1">
-            {busy ? '⏳' : initials}
-          </div>
-          <div className="flex items-center justify-center gap-1 text-white/60">
-            <FileText size={10} /><span className="text-[9px] font-mono">PDF</span>
-          </div>
+          {isVideo ? (
+            <div className="flex flex-col items-center gap-1">
+              <div className="w-12 h-12 rounded-full bg-white/10 flex items-center justify-center mb-1">
+                <Film size={24} className="text-blue-300" />
+              </div>
+              <TypeBadge />
+            </div>
+          ) : (
+            <>
+              <div className="text-3xl md:text-4xl font-bold text-white/90 font-display leading-none mb-1">
+                {busy ? '⏳' : initials}
+              </div>
+              <TypeBadge />
+            </>
+          )}
         </div>
 
         {pct > 0 && (
