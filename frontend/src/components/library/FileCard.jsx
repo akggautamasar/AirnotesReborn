@@ -40,14 +40,18 @@ export default function FileCard({ file, progress, listMode = false }) {
   }
 
   async function assignToFolder(folderId) {
-    await folderStore.assignFile(file.id, folderId);
-    actions.assignFile(file.id, folderId);
+    try {
+      await api.moveFile(file.id, folderId);
+      actions.assignFile(file.id, folderId);
+    } catch (e) { console.error('Move failed:', e); }
     setShowMenu(false);
   }
 
   async function removeFromFolder() {
-    await folderStore.unassignFile(file.id);
-    actions.unassignFile(file.id);
+    try {
+      await api.moveFile(file.id, null);
+      actions.unassignFile(file.id);
+    } catch (e) { console.error('Remove from folder failed:', e); }
     setShowMenu(false);
   }
 
