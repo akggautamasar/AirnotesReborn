@@ -1,12 +1,14 @@
 """
-AirNotes Bot Handler
-- Send any PDF → auto-saved to storage channel
-- /batch → bulk import by link range (same as Beyonddrive)
+AirNotes Bot Handler — upgraded with BeyondDrive features
+- Send any PDF or VIDEO → instantly saved and visible on website
+- /batch → bulk import by link range
 - /start, /help, /cancel
+- Supports both PDF and video file types
 """
 
 import asyncio
 import re
+from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import Message
 import config
@@ -16,8 +18,25 @@ logger = Logger(__name__)
 
 _pending = {}
 
+VIDEO_MIMES = {
+    "video/mp4", "video/x-matroska", "video/webm", "video/x-msvideo",
+    "video/quicktime", "video/x-flv", "video/x-ms-wmv", "video/3gpp",
+    "video/mp2t", "video/mpeg",
+}
+VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".3gp", ".ts", ".mpeg"}
+
+
 def _is_admin(user_id: int) -> bool:
     return user_id in config.TELEGRAM_ADMIN_IDS
+
+
+def _get_file_type(mime: str, fname: str) -> str:
+    if mime == "application/pdf" or fname.lower().endswith(".pdf"):
+        return "pdf"
+    if mime in VIDEO_MIMES or Path(fname).suffix.lower() in VIDEO_EXTS:
+        return "video"
+    return "other"
+
 
 async def _ask(client, chat_id, text, timeout=300):
     queue = asyncio.Queue(1)
@@ -31,6 +50,7 @@ async def _ask(client, chat_id, text, timeout=300):
     finally:
         _pending.pop(chat_id, None)
 
+
 def _parse_link(link: str):
     m = re.match(r'https?://t\.me/([^/]+)/(\d+)', link.strip())
     if m:
@@ -42,13 +62,16 @@ def _parse_link(link: str):
         return ch, int(m.group(2))
     return None
 
-def _add_to_cache(message: Message, file_cache: dict):
+
+def _add_to_cache(message: Message, file_cache: dict) -> bool:
+    """Instantly add a file to the cache — makes it visible on website immediately."""
     media = getattr(message, "document", None) or getattr(message, "video", None)
     if not media:
         return False
     mime = getattr(media, "mime_type", "") or ""
-    fname = getattr(media, "file_name", "") or f"file_{message.id}.pdf"
-    if mime != "application/pdf" and not fname.lower().endswith(".pdf"):
+    fname = getattr(media, "file_name", "") or f"file_{message.id}"
+    ftype = _get_file_type(mime, fname)
+    if ftype == "other":
         return False
     key = f"msg_{message.id}"
     file_cache[key] = {
@@ -58,8 +81,11 @@ def _add_to_cache(message: Message, file_cache: dict):
         "size": getattr(media, "file_size", 0),
         "date": message.date.timestamp() if message.date else 0,
         "caption": message.caption or "",
+        "type": ftype,
+        "mime": mime,
     }
     return True
+
 
 def setup_bot_handlers(bot: Client, file_cache: dict):
 
@@ -69,10 +95,12 @@ def setup_bot_handlers(bot: Client, file_cache: dict):
             return
         await message.reply_text(
             "📚 **AirNotes Bot**\n\n"
-            "**Send any PDF** to this bot and it saves to the storage channel automatically.\n\n"
+            "**Send any PDF or Video** and it saves to the storage channel automatically — "
+            "visible on the website instantly.\n\n"
             "**Commands:**\n"
             "/batch — Bulk import files from a channel by link range\n"
-            "/cancel — Cancel any ongoing operation"
+            "/cancel — Cancel any ongoing operation\n\n"
+            "**Supported files:** PDF, MP4, MKV, WebM, AVI, MOV, and more."
         )
 
     @bot.on_message(filters.private & filters.command("cancel"))
@@ -98,18 +126,33 @@ def setup_bot_handlers(bot: Client, file_cache: dict):
             getattr(message, "document", None) or getattr(message, "video", None) or
             getattr(message, "audio", None) or getattr(message, "photo", None)
         )
+        mime = getattr(media, "mime_type", "") or ""
         fname = getattr(media, "file_name", "file") or "file"
         size_mb = getattr(media, "file_size", 0) / (1024 * 1024)
-        status = await message.reply_text(f"⏳ Saving **{fname}**...")
+        ftype = _get_file_type(mime, fname)
+
+        if ftype == "other":
+            await message.reply_text(
+                f"⚠️ **Unsupported file type**\n\n"
+                f"File: {fname}\n"
+                f"Only PDFs and Videos are stored in the library."
+            )
+            return
+
+        type_label = "📄 PDF" if ftype == "pdf" else "🎬 Video"
+        status = await message.reply_text(f"⏳ Saving {type_label} **{fname}**...")
         try:
             copied = await message.copy(config.STORAGE_CHANNEL)
             added = _add_to_cache(copied, file_cache)
             if added:
                 await status.edit_text(
-                    f"✅ **Saved!**\n\n📄 {fname}\n💾 {size_mb:.1f} MB\n\nNow visible on the website."
+                    f"✅ **Saved & Visible!**\n\n"
+                    f"{type_label} {fname}\n"
+                    f"💾 {size_mb:.1f} MB\n\n"
+                    f"Now visible on the website instantly."
                 )
             else:
-                await status.edit_text(f"✅ Copied (msg {copied.id}) — not a PDF, won't appear in library.")
+                await status.edit_text(f"✅ Copied (msg {copied.id}) — type not recognized for library.")
         except Exception as e:
             logger.error(f"File upload error: {e}")
             await status.edit_text(f"❌ Failed: {e}")
@@ -124,7 +167,7 @@ def setup_bot_handlers(bot: Client, file_cache: dict):
 
         await message.reply_text(
             "📦 **Batch Import**\n\n"
-            "Imports all files between two message links from the same channel.\n\n"
+            "Imports all PDFs and Videos between two message links from the same channel.\n\n"
             "**Link format:** `https://t.me/channelname/123`\n\nSend /cancel anytime."
         )
 
@@ -220,8 +263,10 @@ async def _run_batch_import(client, chat_id, channel, start_id, end_id, file_cac
                     skipped += 1
                 else:
                     copied = await source.copy(config.STORAGE_CHANNEL)
-                    _add_to_cache(copied, file_cache)
-                    imported += 1
+                    if _add_to_cache(copied, file_cache):
+                        imported += 1
+                    else:
+                        skipped += 1
         except Exception as e:
             logger.warning(f"Batch msg {msg_id}: {e}")
             errors += 1
@@ -241,4 +286,4 @@ async def _run_batch_import(client, chat_id, channel, start_id, end_id, file_cac
 
     await client.send_message(chat_id,
         f"🎉 **Done!**\n\n✅ Imported: **{imported}**\n⏭ Skipped: {skipped}\n❌ Errors: {errors}\n\n"
-        f"All files are now visible on the website.")
+        f"All files are now visible on the website instantly.")
