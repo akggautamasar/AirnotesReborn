@@ -23,20 +23,14 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  login:  (password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
-  verify: () => request('/auth/verify'),
-  getFiles: () => request('/files'),
-  search: (q) => request(`/search?q=${encodeURIComponent(q)}`),
-  refresh: () => request('/files/refresh', { method: 'POST' }),
-
-  // Stream URL — includes auth token as query param for range-request compatibility
-  getStreamUrl: (fileId) => {
-    const token = getToken();
-    return `${BASE_URL}/files/${encodeURIComponent(fileId)}/stream`;
-  },
-
-  // Auth header helper for fetch calls that need Range + Authorization together
-  authHeaders: () => ({
-    Authorization: `Bearer ${getToken()}`,
-  }),
+  login:      (password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
+  verify:     () => request('/auth/verify'),
+  getFiles:   () => request('/files'),
+  search:     (q) => request(`/search?q=${encodeURIComponent(q)}`),
+  refresh:    () => request('/files/refresh', { method: 'POST' }),
+  deleteFile: (fileId) => request(`/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' }),
+  renameFile: (fileId, name) => request(`/files/${encodeURIComponent(fileId)}/rename`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  copyFile:   (fileId) => request(`/files/${encodeURIComponent(fileId)}/copy`, { method: 'POST' }),
+  getStreamUrl: (fileId) => `${BASE_URL}/files/${encodeURIComponent(fileId)}/stream`,
+  authHeaders: () => ({ Authorization: `Bearer ${getToken()}` }),
 };
