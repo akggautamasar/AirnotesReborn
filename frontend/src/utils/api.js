@@ -23,18 +23,32 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  login:      (password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
-  verify:     () => request('/auth/verify'),
-  getFiles:   (type = null) => request(`/files${type ? `?type=${type}` : ''}`),
+  // Auth
+  login:    (password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
+  verify:   () => request('/auth/verify'),
+
+  // Files
+  getFiles: (type = null, folderId = null) => {
+    const params = new URLSearchParams();
+    if (type)     params.set('type', type);
+    if (folderId) params.set('folder_id', folderId);
+    return request(`/files${params.toString() ? '?' + params : ''}`);
+  },
   search:     (q, type = null) => request(`/search?q=${encodeURIComponent(q)}${type ? `&type=${type}` : ''}`),
   refresh:    () => request('/files/refresh', { method: 'POST' }),
   deleteFile: (fileId) => request(`/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' }),
   renameFile: (fileId, name) => request(`/files/${encodeURIComponent(fileId)}/rename`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   copyFile:   (fileId) => request(`/files/${encodeURIComponent(fileId)}/copy`, { method: 'POST' }),
+  moveFile:   (fileId, folderId) => request(`/files/${encodeURIComponent(fileId)}/move`, { method: 'POST', body: JSON.stringify({ folder_id: folderId }) }),
 
-  /**
-   * Stream URL for PDFs — uses Authorization header via fetch in PDFReader.
-   */
+  // Folders (persisted in backend)
+  getFolders:    () => request('/folders'),
+  createFolder:  (name) => request('/folders', { method: 'POST', body: JSON.stringify({ name }) }),
+  renameFolder:  (folderId, name) => request(`/folders/${encodeURIComponent(folderId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  deleteFolder:  (folderId) => request(`/folders/${encodeURIComponent(folderId)}`, { method: 'DELETE' }),
+  getFolderFiles:(folderId) => request(`/folders/${encodeURIComponent(folderId)}/files`),
+
+  /** Stream URL for PDFs — uses Authorization header via fetch in PDFReader. */
   getStreamUrl: (fileId) => `${BASE_URL}/files/${encodeURIComponent(fileId)}/stream`,
 
   /**
