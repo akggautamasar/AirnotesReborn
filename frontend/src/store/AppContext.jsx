@@ -9,6 +9,7 @@ const initialState = {
   filesError: null,
   viewMode: localStorage.getItem('viewMode') || 'grid',
   activeSection: 'library',
+  activeTypeFilter: 'all',   // 'all' | 'pdf' | 'video'
   searchQuery: '',
   searchResults: [],
   isSearching: false,
@@ -16,6 +17,7 @@ const initialState = {
   activeFolderId: null,
   fileAssignments: {},
   openFile: null,
+  openFileType: null,        // 'pdf' | 'video'
   readerMode: localStorage.getItem('readerMode') || 'dark',
   recentFiles: [],
   highlights: {},
@@ -33,6 +35,7 @@ function reducer(state, action) {
       localStorage.setItem('viewMode', action.payload);
       return { ...state, viewMode: action.payload };
     case 'SET_ACTIVE_SECTION': return { ...state, activeSection: action.payload, activeFolderId: null };
+    case 'SET_TYPE_FILTER':    return { ...state, activeTypeFilter: action.payload };
     case 'SET_SEARCH_QUERY':   return { ...state, searchQuery: action.payload };
     case 'SET_SEARCH_RESULTS': return { ...state, searchResults: action.payload, isSearching: false };
     case 'SET_SEARCHING':      return { ...state, isSearching: action.payload };
@@ -46,8 +49,8 @@ function reducer(state, action) {
       const a = { ...state.fileAssignments }; delete a[action.fileId]; return { ...state, fileAssignments: a };
     }
     case 'SET_FILE_ASSIGNMENTS': return { ...state, fileAssignments: action.payload };
-    case 'OPEN_FILE':  return { ...state, openFile: action.payload };
-    case 'CLOSE_FILE': return { ...state, openFile: null };
+    case 'OPEN_FILE':  return { ...state, openFile: action.payload, openFileType: action.payload?.type || 'pdf' };
+    case 'CLOSE_FILE': return { ...state, openFile: null, openFileType: null };
     case 'SET_READER_MODE':
       localStorage.setItem('readerMode', action.payload);
       return { ...state, readerMode: action.payload };
@@ -81,6 +84,7 @@ export function AppProvider({ children }) {
     setFilesError: useCallback((e) => dispatch({ type: 'SET_FILES_ERROR', payload: e }), []),
     setViewMode: useCallback((v) => dispatch({ type: 'SET_VIEW_MODE', payload: v }), []),
     setActiveSection: useCallback((s) => dispatch({ type: 'SET_ACTIVE_SECTION', payload: s }), []),
+    setTypeFilter: useCallback((t) => dispatch({ type: 'SET_TYPE_FILTER', payload: t }), []),
     setSearchQuery: useCallback((q) => dispatch({ type: 'SET_SEARCH_QUERY', payload: q }), []),
     setSearchResults: useCallback((r) => dispatch({ type: 'SET_SEARCH_RESULTS', payload: r }), []),
     setSearching: useCallback((v) => dispatch({ type: 'SET_SEARCHING', payload: v }), []),
