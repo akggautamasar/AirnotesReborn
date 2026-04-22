@@ -25,12 +25,26 @@ async function request(path, options = {}) {
 export const api = {
   login:      (password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   verify:     () => request('/auth/verify'),
-  getFiles:   () => request('/files'),
-  search:     (q) => request(`/search?q=${encodeURIComponent(q)}`),
+  getFiles:   (type = null) => request(`/files${type ? `?type=${type}` : ''}`),
+  search:     (q, type = null) => request(`/search?q=${encodeURIComponent(q)}${type ? `&type=${type}` : ''}`),
   refresh:    () => request('/files/refresh', { method: 'POST' }),
   deleteFile: (fileId) => request(`/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' }),
   renameFile: (fileId, name) => request(`/files/${encodeURIComponent(fileId)}/rename`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   copyFile:   (fileId) => request(`/files/${encodeURIComponent(fileId)}/copy`, { method: 'POST' }),
+
+  /**
+   * Stream URL for PDFs — uses Authorization header via fetch in PDFReader.
+   */
   getStreamUrl: (fileId) => `${BASE_URL}/files/${encodeURIComponent(fileId)}/stream`,
+
+  /**
+   * Stream URL for Videos — embeds token as query param so HTML <video> tag works.
+   * HTML video/audio tags cannot set custom headers, so we pass auth via ?token=
+   */
+  getVideoStreamUrl: (fileId) => {
+    const token = getToken();
+    return `${BASE_URL}/files/${encodeURIComponent(fileId)}/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+  },
+
   authHeaders: () => ({ Authorization: `Bearer ${getToken()}` }),
 };
