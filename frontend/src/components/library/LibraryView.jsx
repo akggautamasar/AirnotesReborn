@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useMemo } from 'react';
-import { Grid, List, RefreshCw, AlertCircle, BookOpen } from 'lucide-react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
+import { Grid, List, RefreshCw, AlertCircle, BookOpen, Loader2 } from 'lucide-react';
 import { useApp } from '../../store/AppContext';
 import { api } from '../../utils/api';
 import { progressStore, folderStore, recentStore } from '../../utils/storage';
@@ -9,10 +9,13 @@ export default function LibraryView() {
   const { state, actions } = useApp();
   const [progresses, setProgresses] = useState({});
   const [refreshing, setRefreshing] = useState(false);
+  const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
+  const pollRef = useRef(null);
 
   useEffect(() => {
     loadFiles();
     loadLocalData();
+    return () => clearInterval(pollRef.current);
   }, []);
 
   async function loadFiles() {
@@ -20,9 +23,30 @@ export default function LibraryView() {
     try {
       const res = await api.getFiles();
       actions.setFiles(res.files || []);
+      // If the backend is still building the cache, poll until it finishes
+      if (res.refresh_in_progress) {
+        setBackgroundRefreshing(true);
+        startPolling();
+      } else {
+        setBackgroundRefreshing(false);
+      }
     } catch (e) {
       actions.setFilesError(e.message);
     }
+  }
+
+  function startPolling() {
+    clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await api.getFiles();
+        actions.setFiles(res.files || []);
+        if (!res.refresh_in_progress) {
+          setBackgroundRefreshing(false);
+          clearInterval(pollRef.current);
+        }
+      } catch (_) {}
+    }, 4000); // poll every 4 seconds
   }
 
   async function loadLocalData() {
@@ -46,8 +70,14 @@ export default function LibraryView() {
   async function refresh() {
     setRefreshing(true);
     try {
-      await api.refresh();
-      await loadFiles();
+      const res = await api.refresh();
+      // New backend returns immediately; poll until done
+      if (res.message && res.message.includes('background')) {
+        setBackgroundRefreshing(true);
+        startPolling();
+      } else {
+        await loadFiles();
+      }
     } catch (e) {
       await loadFiles();
     }
@@ -85,14 +115,23 @@ export default function LibraryView() {
       <div className="flex items-center justify-between mb-4 md:mb-6">
         <div>
           <h2 className="font-display text-lg md:text-xl font-semibold text-paper-100">{sectionTitle}</h2>
-          <p className="text-ink-500 text-xs md:text-sm mt-0.5">
-            {displayedFiles.length} {displayedFiles.length === 1 ? 'document' : 'documents'}
-          </p>
+          <div className="flex items-center gap-2 mt-0.5">
+            <p className="text-ink-500 text-xs md:text-sm">
+              {displayedFiles.length} {displayedFiles.length === 1 ? 'document' : 'documents'}
+            </p>
+            {/* Background refresh indicator */}
+            {backgroundRefreshing && (
+              <span className="flex items-center gap-1 text-xs text-amber-400">
+                <Loader2 size={11} className="animate-spin" />
+                syncing…
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={refresh} disabled={refreshing}
+          <button onClick={refresh} disabled={refreshing || backgroundRefreshing}
             className="p-2 text-ink-500 hover:text-ink-200 rounded-lg hover:bg-ink-800/50 transition-all" title="Refresh">
-            <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+            <RefreshCw size={15} className={(refreshing || backgroundRefreshing) ? 'animate-spin' : ''} />
           </button>
           <div className="flex bg-ink-900 border border-ink-800/50 rounded-lg p-0.5">
             {[['grid', Grid], ['list', List]].map(([mode, Icon]) => (
@@ -124,16 +163,23 @@ export default function LibraryView() {
         </div>
       )}
 
-      {/* Empty */}
+      {/* Empty (but cache may still be loading) */}
       {!state.filesLoading && !state.filesError && displayedFiles.length === 0 && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <BookOpen size={40} className="text-ink-700 mb-4" />
           <p className="text-ink-400 font-medium mb-1">
-            {state.activeSection === 'folder' ? 'This folder is empty' : 'No PDFs found'}
+            {backgroundRefreshing
+              ? 'Loading your PDFs from Telegram…'
+              : state.activeSection === 'folder' ? 'This folder is empty' : 'No PDFs found'}
           </p>
           <p className="text-ink-600 text-sm">
-            {state.activeSection === 'folder' ? 'Assign PDFs to this folder from the library' : 'Add PDF files to your Telegram channel'}
+            {backgroundRefreshing
+              ? 'This only happens once. Files will appear automatically.'
+              : state.activeSection === 'folder'
+                ? 'Assign PDFs to this folder from the library'
+                : 'Add PDF files to your Telegram channel'}
           </p>
+          {backgroundRefreshing && <Loader2 size={20} className="animate-spin text-ink-600 mt-4" />}
         </div>
       )}
 
