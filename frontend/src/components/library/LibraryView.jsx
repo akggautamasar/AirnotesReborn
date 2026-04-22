@@ -1,313 +1,225 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { FileText, MoreVertical, FolderPlus, FolderMinus, Clock, Trash2, Pencil, Copy, Check, X } from 'lucide-react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
+import { Grid, List, RefreshCw, AlertCircle, BookOpen, Loader2 } from 'lucide-react';
 import { useApp } from '../../store/AppContext';
-import { formatSize, formatRelativeDate, cleanFileName, getInitials, stringToColor } from '../../utils/format';
-import { folderStore, recentStore } from '../../utils/storage';
 import { api } from '../../utils/api';
+import { progressStore, folderStore, recentStore } from '../../utils/storage';
+import FileCard from './FileCard';
 
-export default function FileCard({ file, progress, listMode = false }) {
+export default function LibraryView() {
   const { state, actions } = useApp();
-  const [showMenu, setShowMenu] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [renameValue, setRenameValue] = useState('');
-  const [loading, setLoading] = useState(null); // 'delete' | 'copy' | 'rename'
-  const menuRef = useRef(null);
-  const renameRef = useRef(null);
-
-  const title = cleanFileName(file.name);
-  const initials = getInitials(file.name);
-  const color = stringToColor(file.name);
-  const pct = progress?.percent || 0;
+  const [progresses, setProgresses] = useState({});
+  const [refreshing, setRefreshing] = useState(false);
+  const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
+  const pollRef = useRef(null);
 
   useEffect(() => {
-    if (!showMenu) return;
-    function handler(e) {
-      if (menuRef.current && !menuRef.current.contains(e.target)) setShowMenu(false);
-    }
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showMenu]);
+    loadFiles();
+    loadLocalData();
+    return () => clearInterval(pollRef.current);
+  }, []);
 
-  useEffect(() => {
-    if (renaming && renameRef.current) renameRef.current.focus();
-  }, [renaming]);
-
-  function openFile() {
-    if (renaming) return;
-    actions.openFile(file);
-    recentStore.add(file.id, file.name);
-    actions.addRecent({ fileId: file.id, fileName: file.name, openedAt: Date.now() });
-  }
-
-  async function assignToFolder(folderId) {
-    await folderStore.assignFile(file.id, folderId);
-    actions.assignFile(file.id, folderId);
-    setShowMenu(false);
-  }
-
-  async function removeFromFolder() {
-    await folderStore.unassignFile(file.id);
-    actions.unassignFile(file.id);
-    setShowMenu(false);
-  }
-
-  async function handleDelete() {
-    if (!window.confirm(`Delete "${title}"? This cannot be undone.`)) return;
-    setLoading('delete');
-    setShowMenu(false);
+  async function loadFiles() {
+    actions.setFilesLoading(true);
     try {
-      await api.deleteFile(file.id);
-      actions.setFiles(state.files.filter(f => f.id !== file.id));
+      const res = await api.getFiles();
+      actions.setFiles(res.files || []);
+      // If the backend is still building the cache, poll until it finishes
+      if (res.refresh_in_progress) {
+        setBackgroundRefreshing(true);
+        startPolling();
+      } else {
+        setBackgroundRefreshing(false);
+      }
     } catch (e) {
-      alert(`Delete failed: ${e.message}`);
+      actions.setFilesError(e.message);
     }
-    setLoading(null);
   }
 
-  async function handleCopy() {
-    setLoading('copy');
-    setShowMenu(false);
+  function startPolling() {
+    clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await api.getFiles();
+        actions.setFiles(res.files || []);
+        if (!res.refresh_in_progress) {
+          setBackgroundRefreshing(false);
+          clearInterval(pollRef.current);
+        }
+      } catch (_) {}
+    }, 4000); // poll every 4 seconds
+  }
+
+  async function loadLocalData() {
+    const allProgress = await progressStore.getAll();
+    const map = {};
+    for (const p of allProgress) map[p.fileId] = p;
+    setProgresses(map);
+
+    const folders = await folderStore.getAll();
+    actions.setFolders(folders);
+
+    const assignments = await folderStore.getAllAssignments();
+    const assignMap = {};
+    for (const a of assignments) assignMap[a.fileId] = a.folderId;
+    actions.setFileAssignments(assignMap);
+
+    const recent = await recentStore.getAll(20);
+    actions.setRecent(recent);
+  }
+
+  async function refresh() {
+    setRefreshing(true);
     try {
-      const res = await api.copyFile(file.id);
-      actions.setFiles([res.file, ...state.files]);
+      const res = await api.refresh();
+      // New backend returns immediately; poll until done
+      if (res.message && res.message.includes('background')) {
+        setBackgroundRefreshing(true);
+        startPolling();
+      } else {
+        await loadFiles();
+      }
     } catch (e) {
-      alert(`Copy failed: ${e.message}`);
+      await loadFiles();
     }
-    setLoading(null);
+    setRefreshing(false);
   }
 
-  function startRename() {
-    setRenameValue(cleanFileName(file.name));
-    setRenaming(true);
-    setShowMenu(false);
-  }
-
-  async function submitRename() {
-    const trimmed = renameValue.trim();
-    if (!trimmed || trimmed === cleanFileName(file.name)) { setRenaming(false); return; }
-    setLoading('rename');
-    try {
-      const res = await api.renameFile(file.id, trimmed);
-      actions.setFiles(state.files.map(f => f.id === file.id ? res.file : f));
-    } catch (e) {
-      alert(`Rename failed: ${e.message}`);
+  const displayedFiles = useMemo(() => {
+    let files = state.files;
+    if (state.activeSection === 'search') return state.searchResults;
+    if (state.activeSection === 'recent') {
+      const ids = state.recentFiles.map(r => r.fileId);
+      return ids.map(id => state.files.find(f => f.id === id)).filter(Boolean);
     }
-    setRenaming(false);
-    setLoading(null);
-  }
+    if (state.activeSection === 'folder' && state.activeFolderId) {
+      const inFolder = Object.entries(state.fileAssignments)
+        .filter(([, fid]) => fid === state.activeFolderId).map(([fileId]) => fileId);
+      return files.filter(f => inFolder.includes(f.id));
+    }
+    return files;
+  }, [state.files, state.activeSection, state.searchResults, state.recentFiles, state.activeFolderId, state.fileAssignments]);
 
-  const currentFolder = state.fileAssignments[file.id];
-  const availableFolders = state.folders.filter(f => f.id !== currentFolder);
-  const busy = loading !== null;
+  const sectionTitle = useMemo(() => {
+    if (state.activeSection === 'search') return `Results for "${state.searchQuery}"`;
+    if (state.activeSection === 'recent') return 'Recently Opened';
+    if (state.activeSection === 'folder' && state.activeFolderId) {
+      const f = state.folders.find(f => f.id === state.activeFolderId);
+      return f ? `📁 ${f.name}` : 'Folder';
+    }
+    return 'My Library';
+  }, [state.activeSection, state.searchQuery, state.activeFolderId, state.folders]);
 
-  if (listMode) {
-    return (
-      <div
-        className={`group flex items-center gap-3 md:gap-4 px-3 md:px-4 py-2.5 rounded-xl
-                    hover:bg-ink-800/40 transition-all duration-150 border border-transparent
-                    hover:border-ink-700/30 ${renaming ? '' : 'cursor-pointer'}`}
-        onClick={renaming ? undefined : openFile}
-      >
-        <div
-          className="w-8 h-10 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-bold text-white"
-          style={{ background: color }}
-        >
-          {busy ? <span className="animate-pulse text-base">⏳</span> : initials}
-        </div>
-
-        <div className="flex-1 min-w-0">
-          {renaming ? (
-            <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-              <input
-                ref={renameRef}
-                value={renameValue}
-                onChange={e => setRenameValue(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') submitRename();
-                  if (e.key === 'Escape') setRenaming(false);
-                }}
-                className="flex-1 bg-ink-800 text-ink-100 text-sm px-2 py-0.5 rounded border border-ink-600 outline-none focus:border-ink-400"
-              />
-              <button onClick={submitRename} className="text-green-400 hover:text-green-300 p-0.5"><Check size={14} /></button>
-              <button onClick={() => setRenaming(false)} className="text-red-400 hover:text-red-300 p-0.5"><X size={14} /></button>
-            </div>
-          ) : (
-            <>
-              <p className="text-ink-100 text-sm font-medium truncate group-hover:text-paper-100 transition-colors">{title}</p>
-              <p className="text-ink-500 text-xs truncate hidden md:block">{file.caption || file.name}</p>
-            </>
-          )}
-        </div>
-
-        <div className="w-16 md:w-20 text-right text-ink-500 text-xs flex-shrink-0 hidden sm:block">
-          {formatSize(file.size)}
-        </div>
-        <div className="w-20 md:w-24 text-right text-ink-500 text-xs flex-shrink-0 hidden md:block">
-          {formatRelativeDate(file.date)}
-        </div>
-
-        <div className="w-16 md:w-20 flex-shrink-0 hidden sm:block">
-          {pct > 0 && <div className="text-right text-xs text-ink-500 mb-0.5">{pct}%</div>}
-          <div className="h-1 bg-ink-800 rounded-full overflow-hidden">
-            {pct > 0 && <div className="h-full bg-ink-500 rounded-full" style={{ width: `${pct}%` }} />}
-          </div>
-        </div>
-
-        <div className="w-6 flex-shrink-0 relative" ref={menuRef} onClick={e => e.stopPropagation()}>
-          <button
-            onClick={() => setShowMenu(!showMenu)}
-            className="opacity-0 group-hover:opacity-100 text-ink-500 hover:text-ink-200 transition-all p-1"
-          >
-            <MoreVertical size={14} />
-          </button>
-          {showMenu && (
-            <FileMenu
-              availableFolders={availableFolders}
-              currentFolder={currentFolder}
-              onAssign={assignToFolder}
-              onRemove={removeFromFolder}
-              onDelete={handleDelete}
-              onCopy={handleCopy}
-              onRename={startRename}
-              onClose={() => setShowMenu(false)}
-            />
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // Grid card
   return (
-    <div
-      className={`group relative rounded-2xl border border-ink-800/40 overflow-hidden
-                  hover:border-ink-600/50 transition-all duration-200
-                  hover:shadow-xl hover:shadow-ink-900/50 hover:-translate-y-0.5
-                  ${renaming ? '' : 'cursor-pointer'}`}
-      onClick={renaming ? undefined : openFile}
-    >
-      <div
-        className="h-32 md:h-36 flex items-center justify-center relative"
-        style={{ background: `linear-gradient(135deg, ${color}cc, ${color}66)` }}
-      >
-        <div className="absolute inset-0 opacity-10"
-          style={{ backgroundImage: 'repeating-linear-gradient(45deg,#fff 0,#fff 1px,transparent 0,transparent 50%)', backgroundSize: '8px 8px' }} />
-
-        <div className="relative text-center px-2">
-          <div className="text-3xl md:text-4xl font-bold text-white/90 font-display leading-none mb-1">
-            {busy ? '⏳' : initials}
-          </div>
-          <div className="flex items-center justify-center gap-1 text-white/60">
-            <FileText size={10} /><span className="text-[9px] font-mono">PDF</span>
+    <div className="flex-1 overflow-y-auto p-4 md:p-6">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4 md:mb-6">
+        <div>
+          <h2 className="font-display text-lg md:text-xl font-semibold text-paper-100">{sectionTitle}</h2>
+          <div className="flex items-center gap-2 mt-0.5">
+            <p className="text-ink-500 text-xs md:text-sm">
+              {displayedFiles.length} {displayedFiles.length === 1 ? 'document' : 'documents'}
+            </p>
+            {/* Background refresh indicator */}
+            {backgroundRefreshing && (
+              <span className="flex items-center gap-1 text-xs text-amber-400">
+                <Loader2 size={11} className="animate-spin" />
+                syncing…
+              </span>
+            )}
           </div>
         </div>
-
-        {pct > 0 && (
-          <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/20">
-            <div className="h-full bg-white/50 transition-all" style={{ width: `${pct}%` }} />
-          </div>
-        )}
-
-        <div ref={menuRef} className="absolute top-2 right-2" onClick={e => e.stopPropagation()}>
-          <button
-            className="opacity-0 group-hover:opacity-100 transition-all p-1.5 rounded-lg bg-black/50 backdrop-blur-sm text-white/70 hover:text-white"
-            onClick={() => setShowMenu(!showMenu)}
-          >
-            <MoreVertical size={13} />
+        <div className="flex items-center gap-2">
+          <button onClick={refresh} disabled={refreshing || backgroundRefreshing}
+            className="p-2 text-ink-500 hover:text-ink-200 rounded-lg hover:bg-ink-800/50 transition-all" title="Refresh">
+            <RefreshCw size={15} className={(refreshing || backgroundRefreshing) ? 'animate-spin' : ''} />
           </button>
-          {showMenu && (
-            <div className="absolute top-8 right-0 z-20">
-              <FileMenu
-                availableFolders={availableFolders}
-                currentFolder={currentFolder}
-                onAssign={assignToFolder}
-                onRemove={removeFromFolder}
-                onDelete={handleDelete}
-                onCopy={handleCopy}
-                onRename={startRename}
-                onClose={() => setShowMenu(false)}
-              />
-            </div>
-          )}
+          <div className="flex bg-ink-900 border border-ink-800/50 rounded-lg p-0.5">
+            {[['grid', Grid], ['list', List]].map(([mode, Icon]) => (
+              <button key={mode} onClick={() => actions.setViewMode(mode)}
+                className={`p-1.5 rounded-md transition-all ${state.viewMode === mode ? 'bg-ink-700 text-ink-100' : 'text-ink-500 hover:text-ink-300'}`}>
+                <Icon size={14} />
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      <div className="p-2.5 md:p-3 bg-ink-900">
-        {renaming ? (
-          <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-            <input
-              ref={renameRef}
-              value={renameValue}
-              onChange={e => setRenameValue(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter') submitRename();
-                if (e.key === 'Escape') setRenaming(false);
-              }}
-              className="flex-1 bg-ink-800 text-ink-100 text-xs px-2 py-0.5 rounded border border-ink-600 outline-none focus:border-ink-400"
-            />
-            <button onClick={submitRename} className="text-green-400 hover:text-green-300"><Check size={12} /></button>
-            <button onClick={() => setRenaming(false)} className="text-red-400 hover:text-red-300"><X size={12} /></button>
-          </div>
-        ) : (
-          <p className="text-ink-100 text-xs font-medium truncate leading-snug mb-1">{title}</p>
-        )}
-        <div className="flex items-center justify-between text-ink-600 text-[10px]">
-          <span>{formatSize(file.size)}</span>
-          <span className="flex items-center gap-0.5"><Clock size={9} />{formatRelativeDate(file.date)}</span>
+      {/* Loading skeletons */}
+      {state.filesLoading && (
+        <div className={state.viewMode === 'grid'
+          ? 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 md:gap-4'
+          : 'space-y-1'}>
+          {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} list={state.viewMode === 'list'} />)}
         </div>
-        {pct > 0 && (
-          <div className="mt-1.5 flex items-center gap-1.5">
-            <div className="flex-1 h-0.5 bg-ink-800 rounded-full overflow-hidden">
-              <div className="h-full bg-ink-500 rounded-full" style={{ width: `${pct}%` }} />
-            </div>
-            <span className="text-[9px] text-ink-600">{pct}%</span>
+      )}
+
+      {/* Error */}
+      {state.filesError && !state.filesLoading && (
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <AlertCircle size={32} className="text-red-400 mb-3" />
+          <p className="text-ink-300 mb-1 font-medium">Failed to load files</p>
+          <p className="text-ink-500 text-sm mb-4">{state.filesError}</p>
+          <button onClick={loadFiles} className="btn-primary text-sm">Retry</button>
+        </div>
+      )}
+
+      {/* Empty (but cache may still be loading) */}
+      {!state.filesLoading && !state.filesError && displayedFiles.length === 0 && (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <BookOpen size={40} className="text-ink-700 mb-4" />
+          <p className="text-ink-400 font-medium mb-1">
+            {backgroundRefreshing
+              ? 'Loading your PDFs from Telegram…'
+              : state.activeSection === 'folder' ? 'This folder is empty' : 'No PDFs found'}
+          </p>
+          <p className="text-ink-600 text-sm">
+            {backgroundRefreshing
+              ? 'This only happens once. Files will appear automatically.'
+              : state.activeSection === 'folder'
+                ? 'Assign PDFs to this folder from the library'
+                : 'Add PDF files to your Telegram channel'}
+          </p>
+          {backgroundRefreshing && <Loader2 size={20} className="animate-spin text-ink-600 mt-4" />}
+        </div>
+      )}
+
+      {/* Grid */}
+      {!state.filesLoading && !state.filesError && displayedFiles.length > 0 && state.viewMode === 'grid' && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 md:gap-4 animate-fade-in">
+          {displayedFiles.map(file => (
+            <FileCard key={file.id} file={file} progress={progresses[file.id]} />
+          ))}
+        </div>
+      )}
+
+      {/* List */}
+      {!state.filesLoading && !state.filesError && displayedFiles.length > 0 && state.viewMode === 'list' && (
+        <div className="space-y-0.5 animate-fade-in">
+          <div className="hidden md:flex items-center gap-4 px-4 py-2 text-[11px] font-medium text-ink-600 uppercase tracking-wider">
+            <div className="w-8" /><div className="flex-1">Title</div>
+            <div className="w-20 text-right">Size</div><div className="w-24 text-right">Added</div>
+            <div className="w-20 text-right">Progress</div><div className="w-6" />
           </div>
-        )}
-      </div>
+          {displayedFiles.map(file => (
+            <FileCard key={file.id} file={file} progress={progresses[file.id]} listMode />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function FileMenu({ availableFolders, currentFolder, onAssign, onRemove, onDelete, onCopy, onRename, onClose }) {
+function SkeletonCard({ list }) {
+  if (list) return (
+    <div className="flex items-center gap-4 px-4 py-3 rounded-xl">
+      <div className="w-8 h-10 rounded-lg shimmer flex-shrink-0" />
+      <div className="flex-1"><div className="h-3 w-3/4 rounded shimmer mb-1.5" /><div className="h-2 w-1/2 rounded shimmer" /></div>
+    </div>
+  );
   return (
-    <div className="glass rounded-xl shadow-2xl min-w-[170px] py-1.5 z-50" onMouseLeave={onClose}>
-      <button onClick={onRename}
-        className="w-full text-left px-3 py-2 text-xs text-ink-300 hover:bg-ink-700/50 flex items-center gap-2">
-        <Pencil size={12} /> Rename
-      </button>
-      <button onClick={onCopy}
-        className="w-full text-left px-3 py-2 text-xs text-ink-300 hover:bg-ink-700/50 flex items-center gap-2">
-        <Copy size={12} /> Copy
-      </button>
-      <button onClick={onDelete}
-        className="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-red-500/10 flex items-center gap-2">
-        <Trash2 size={12} /> Delete
-      </button>
-
-      {(currentFolder || availableFolders.length > 0) && (
-        <div className="border-t border-ink-700/50 my-1" />
-      )}
-
-      {currentFolder && (
-        <button onClick={onRemove}
-          className="w-full text-left px-3 py-2 text-xs text-ink-400 hover:bg-ink-700/50 flex items-center gap-2">
-          <FolderMinus size={12} /> Remove from folder
-        </button>
-      )}
-      {availableFolders.length > 0 && (
-        <>
-          <div className="px-3 py-1 text-[10px] text-ink-600 uppercase tracking-wider">Add to folder</div>
-          {availableFolders.map(f => (
-            <button key={f.id} onClick={() => onAssign(f.id)}
-              className="w-full text-left px-3 py-2 text-xs text-ink-300 hover:bg-ink-700/50 flex items-center gap-2">
-              <FolderPlus size={12} /> {f.name}
-            </button>
-          ))}
-        </>
-      )}
-      {!currentFolder && availableFolders.length === 0 && (
-        <p className="px-3 py-2 text-xs text-ink-600">No folders yet</p>
-      )}
+    <div className="rounded-2xl overflow-hidden border border-ink-800/30">
+      <div className="h-36 shimmer" />
+      <div className="p-3"><div className="h-3 w-3/4 rounded shimmer mb-1.5" /><div className="h-2 w-1/2 rounded shimmer" /></div>
     </div>
   );
 }
