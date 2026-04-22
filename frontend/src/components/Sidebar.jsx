@@ -1,37 +1,58 @@
 import React, { useState } from 'react';
-import { BookOpen, Clock, Search, LogOut, Plus, ChevronRight, ChevronDown, Folder } from 'lucide-react';
+import { BookOpen, Clock, Search, LogOut, Plus, ChevronRight, ChevronDown, Folder, FolderOpen } from 'lucide-react';
 import { useApp } from '../store/AppContext';
-import { folderStore } from '../utils/storage';
+import { api } from '../utils/api';
 
-export default function Sidebar({ onSearch }) {
+export default function Sidebar({ onSearch, onFolderCreated, onFolderChanged }) {
   const { state, actions } = useApp();
   const [expandedFolders, setExpandedFolders] = useState(new Set());
-  const [creatingFolder, setCreatingFolder] = useState(false);
-  const [newFolderName, setNewFolderName] = useState('');
-  const [renamingId, setRenamingId] = useState(null);
-  const [renameValue, setRenameValue] = useState('');
+  const [creatingFolder, setCreatingFolder]   = useState(false);
+  const [newFolderName, setNewFolderName]     = useState('');
+  const [renamingId, setRenamingId]           = useState(null);
+  const [renameValue, setRenameValue]         = useState('');
+  const [saving, setSaving]                   = useState(false);
 
   const rootFolders = state.folders.filter(f => !f.parentId);
 
   async function createFolder() {
-    if (!newFolderName.trim()) return;
-    const id = await folderStore.create(newFolderName.trim());
-    actions.addFolder({ id, name: newFolderName.trim(), parentId: null, createdAt: Date.now() });
-    setNewFolderName('');
-    setCreatingFolder(false);
+    if (!newFolderName.trim() || saving) return;
+    setSaving(true);
+    try {
+      const data = await api.createFolder(newFolderName.trim());
+      const folder = { id: data.folder.id, name: data.folder.name, parentId: data.folder.parent_id,
+                       createdAt: data.folder.created_at, fileCount: 0 };
+      actions.addFolder(folder);
+      setNewFolderName('');
+      setCreatingFolder(false);
+      onFolderCreated?.();
+    } catch (e) {
+      console.error('Create folder failed:', e);
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function doRename(folderId) {
-    if (!renameValue.trim()) return;
-    await folderStore.rename(folderId, renameValue.trim());
-    actions.renameFolder(folderId, renameValue.trim());
+    if (!renameValue.trim()) { setRenamingId(null); return; }
+    try {
+      await api.renameFolder(folderId, renameValue.trim());
+      actions.renameFolder(folderId, renameValue.trim());
+      onFolderChanged?.();
+    } catch (e) {
+      console.error('Rename failed:', e);
+    }
     setRenamingId(null);
   }
 
   async function deleteFolder(folderId) {
-    await folderStore.delete(folderId);
-    actions.removeFolder(folderId);
-    if (state.activeFolderId === folderId) actions.setActiveSection('library');
+    try {
+      await api.deleteFolder(folderId);
+      actions.removeFolder(folderId);
+      if (state.activeFolderId === folderId) actions.setActiveSection('library');
+      onFolderChanged?.();
+    } catch (e) {
+      console.error('Delete folder failed:', e);
+    }
   }
 
   return (
@@ -44,20 +65,18 @@ export default function Sidebar({ onSearch }) {
           </div>
           <div>
             <h1 className="font-display text-base font-bold text-paper-100 leading-none">AirNotes</h1>
-            <span className="text-emerald-400 text-[10px]">MTProto · No size limit</span>
+            <span className="text-emerald-400 text-[10px]">MTProto · Instant sync</span>
           </div>
         </div>
       </div>
 
       {/* Search */}
       <div className="px-3 py-3">
-        <button
-          onClick={onSearch}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-ink-800/50
-                     border border-ink-700/30 text-ink-400 text-sm hover:bg-ink-800 hover:text-ink-200 transition-all"
-        >
+        <button onClick={onSearch}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-ink-800/50
+                           border border-ink-700/30 text-ink-400 text-sm hover:bg-ink-800 hover:text-ink-200 transition-all">
           <Search size={14} />
-          <span className="font-body text-xs">Search PDFs…</span>
+          <span className="font-body text-xs">Search…</span>
           <kbd className="ml-auto text-[10px] bg-ink-700/50 px-1.5 py-0.5 rounded text-ink-500">⌘K</kbd>
         </button>
       </div>
@@ -65,20 +84,15 @@ export default function Sidebar({ onSearch }) {
       {/* Nav */}
       <nav className="px-3 space-y-0.5">
         {[
-          { key: 'library', icon: BookOpen, label: 'Library', count: state.files.length },
-          { key: 'recent',  icon: Clock,    label: 'Recent',  count: state.recentFiles.length },
+          { key: 'library', icon: BookOpen, label: 'All Files', count: state.files.length },
+          { key: 'recent',  icon: Clock,    label: 'Recent',    count: state.recentFiles.length },
         ].map(item => (
-          <button
-            key={item.key}
-            onClick={() => actions.setActiveSection(item.key)}
-            className={`sidebar-item w-full ${state.activeSection === item.key && !state.activeFolderId ? 'active' : ''}`}
-          >
+          <button key={item.key} onClick={() => actions.setActiveSection(item.key)}
+                  className={`sidebar-item w-full ${state.activeSection === item.key && !state.activeFolderId ? 'active' : ''}`}>
             <item.icon size={15} />
             <span className="flex-1 text-left">{item.label}</span>
             {item.count > 0 && (
-              <span className="text-[10px] bg-ink-700/60 text-ink-400 px-1.5 py-0.5 rounded-full">
-                {item.count}
-              </span>
+              <span className="text-[10px] bg-ink-700/60 text-ink-400 px-1.5 py-0.5 rounded-full">{item.count}</span>
             )}
           </button>
         ))}
@@ -95,13 +109,11 @@ export default function Sidebar({ onSearch }) {
 
         {creatingFolder && (
           <div className="mb-2 flex gap-1">
-            <input
-              autoFocus value={newFolderName} onChange={e => setNewFolderName(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') createFolder(); if (e.key === 'Escape') setCreatingFolder(false); }}
-              placeholder="Folder name"
-              className="flex-1 bg-ink-800 border border-ink-600 rounded-lg px-2 py-1 text-xs text-ink-100 focus:outline-none"
-            />
-            <button onClick={createFolder} className="text-ink-300 hover:text-ink-100 px-1">✓</button>
+            <input autoFocus value={newFolderName} onChange={e => setNewFolderName(e.target.value)}
+                   onKeyDown={e => { if (e.key === 'Enter') createFolder(); if (e.key === 'Escape') { setCreatingFolder(false); setNewFolderName(''); } }}
+                   placeholder="Folder name"
+                   className="flex-1 bg-ink-800 border border-ink-600 rounded-lg px-2 py-1 text-xs text-ink-100 focus:outline-none" />
+            <button onClick={createFolder} disabled={saving} className="text-ink-300 hover:text-ink-100 px-1">✓</button>
           </div>
         )}
 
@@ -110,20 +122,15 @@ export default function Sidebar({ onSearch }) {
         )}
 
         {rootFolders.map(folder => (
-          <FolderItem
-            key={folder.id}
-            folder={folder}
-            allFolders={state.folders}
+          <FolderItem key={folder.id} folder={folder} allFolders={state.folders}
             isActive={state.activeFolderId === folder.id}
             expanded={expandedFolders.has(folder.id)}
-            renamingId={renamingId}
-            renameValue={renameValue}
+            renamingId={renamingId} renameValue={renameValue}
             onRenameChange={setRenameValue}
             onToggle={() => setExpandedFolders(prev => { const n = new Set(prev); n.has(folder.id) ? n.delete(folder.id) : n.add(folder.id); return n; })}
             onSelect={() => actions.setActiveFolder(folder.id)}
             onStartRename={(id, name) => { setRenamingId(id); setRenameValue(name); }}
-            onRename={doRename}
-            onDelete={deleteFolder}
+            onRename={doRename} onDelete={deleteFolder}
             fileAssignments={state.fileAssignments}
           />
         ))}
@@ -144,7 +151,8 @@ function FolderItem({ folder, allFolders, isActive, expanded, renamingId, rename
   onRenameChange, onToggle, onSelect, onStartRename, onRename, onDelete, fileAssignments }) {
   const [showMenu, setShowMenu] = useState(false);
   const fileCount = Object.values(fileAssignments).filter(fid => fid === folder.id).length;
-  const children = allFolders.filter(f => f.parentId === folder.id);
+  const children  = allFolders.filter(f => f.parentId === folder.id);
+  const Icon = isActive ? FolderOpen : Folder;
 
   if (renamingId === folder.id) {
     return (
@@ -160,27 +168,26 @@ function FolderItem({ folder, allFolders, isActive, expanded, renamingId, rename
 
   return (
     <div>
-      <div
-        className={`relative group flex items-center gap-1.5 px-2 py-1.5 rounded-lg cursor-pointer text-sm transition-all
-          ${isActive ? 'bg-ink-800 text-ink-100' : 'text-ink-400 hover:text-ink-200 hover:bg-ink-800/50'}`}
-        onClick={onSelect}
-      >
+      <div className={`relative group flex items-center gap-1.5 px-2 py-1.5 rounded-lg cursor-pointer text-sm transition-all
+                       ${isActive ? 'bg-ink-800 text-ink-100' : 'text-ink-400 hover:text-ink-200 hover:bg-ink-800/50'}`}
+           onClick={onSelect}>
         {children.length > 0 && (
           <button onClick={e => { e.stopPropagation(); onToggle(); }} className="text-ink-600 hover:text-ink-400 flex-shrink-0">
             {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
           </button>
         )}
-        <Folder size={13} className="flex-shrink-0" />
+        <Icon size={13} className="flex-shrink-0" />
         <span className="flex-1 truncate text-xs font-medium">{folder.name}</span>
         {fileCount > 0 && <span className="text-[10px] bg-ink-700/50 text-ink-500 px-1 rounded">{fileCount}</span>}
         <div className="relative opacity-0 group-hover:opacity-100 transition-opacity">
           <button onClick={e => { e.stopPropagation(); setShowMenu(!showMenu); }} className="text-ink-600 hover:text-ink-300 px-0.5">⋯</button>
           {showMenu && (
-            <div className="absolute right-0 top-full mt-1 z-50 glass rounded-lg shadow-xl min-w-[120px] py-1" onMouseLeave={() => setShowMenu(false)}>
+            <div className="absolute right-0 top-full mt-1 z-50 glass rounded-lg shadow-xl min-w-[120px] py-1"
+                 onMouseLeave={() => setShowMenu(false)}>
               <button onClick={e => { e.stopPropagation(); onStartRename(folder.id, folder.name); setShowMenu(false); }}
-                className="w-full text-left px-3 py-1.5 text-xs text-ink-300 hover:bg-ink-700/50">Rename</button>
+                      className="w-full text-left px-3 py-1.5 text-xs text-ink-300 hover:bg-ink-700/50">Rename</button>
               <button onClick={e => { e.stopPropagation(); onDelete(folder.id); setShowMenu(false); }}
-                className="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-red-500/10">Delete</button>
+                      className="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-red-500/10">Delete</button>
             </div>
           )}
         </div>
