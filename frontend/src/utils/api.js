@@ -47,6 +47,7 @@ export const api = {
   renameFolder:  (folderId, name) => request(`/folders/${encodeURIComponent(folderId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteFolder:  (folderId) => request(`/folders/${encodeURIComponent(folderId)}`, { method: 'DELETE' }),
   getFolderFiles:(folderId) => request(`/folders/${encodeURIComponent(folderId)}/files`),
+  getFileAssignments: () => request('/assignments'),
 
   /** Stream URL for PDFs — uses Authorization header via fetch in PDFReader. */
   getStreamUrl: (fileId) => `${BASE_URL}/files/${encodeURIComponent(fileId)}/stream`,
