@@ -268,6 +268,15 @@ def setup_bot_handlers(bot: Client, file_cache: dict, folder_db: dict, save_fold
                 if current_folder_id:
                     folder_db["file_assignments"][file_id] = current_folder_id
                     save_folders_fn()
+                # Push to all SSE-connected browser clients instantly
+                try:
+                    from main import notify_new_file
+                    entry = dict(file_cache[file_id])
+                    if current_folder_id:
+                        entry["folder_id"] = current_folder_id
+                    notify_new_file(entry)
+                except Exception as _sse_err:
+                    logger.warning(f"SSE notify failed: {_sse_err}")
                 await status.edit_text(
                     f"✅ **Saved & Visible Instantly!**\n\n"
                     f"{type_label} **{fname}**\n"

@@ -384,3 +384,76 @@ async def get_folder_files(folder_id: str, user=Depends(require_auth)):
     files = [file_cache[fid] for fid in file_ids if fid in file_cache]
     files.sort(key=lambda f: f["date"], reverse=True)
     return {"files": files, "folder": folder_db["folders"][folder_id]}
+
+# ─── SSE: instant file update stream ───────────────────────────────────────────
+import asyncio
+from fastapi.responses import StreamingResponse
+
+# All active SSE queues — one per connected client
+_sse_queues: list[asyncio.Queue] = []
+
+def notify_new_file(file_entry: dict):
+    """Call this whenever a new file is added to file_cache (from bot handler)."""
+    import json as _json
+    data = _json.dumps({"event": "new_file", "file": file_entry})
+    dead = []
+    for q in _sse_queues:
+        try:
+            q.put_nowait(data)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        try:
+            _sse_queues.remove(q)
+        except ValueError:
+            pass
+
+@app.get("/api/events")
+async def sse_events(request: Request, token: str = None):
+    """Server-Sent Events endpoint — pushes new files to all connected clients instantly."""
+    # Auth via query param (EventSource can't set headers)
+    if not token:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        verify_jwt(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _sse_queues.append(queue)
+
+    async def event_generator():
+        try:
+            # Send a keepalive comment every 25s so proxies don't close the connection
+            yield ": keepalive\n\n"
+            while True:
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=25)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                except Exception:
+                    break
+                if await request.is_disconnected():
+                    break
+        finally:
+            try:
+                _sse_queues.remove(queue)
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+@app.get("/api/assignments")
+async def get_all_assignments(user=Depends(require_auth)):
+    """Return all file→folder assignments in one call."""
+    return {"assignments": folder_db.get("file_assignments", {})}
