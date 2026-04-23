@@ -1,8 +1,8 @@
-import React, { useEffect, useState, useMemo, useRef } from 'react';
-import { Grid, List, RefreshCw, AlertCircle, BookOpen, Loader2 } from 'lucide-react';
+import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
+import { Grid, List, RefreshCw, AlertCircle, BookOpen, Loader2, Zap } from 'lucide-react';
 import { useApp } from '../../store/AppContext';
 import { api } from '../../utils/api';
-import { progressStore, folderStore, recentStore } from '../../utils/storage';
+import { progressStore, recentStore } from '../../utils/storage';
 import FileCard from './FileCard';
 
 export default function LibraryView() {
@@ -10,20 +10,83 @@ export default function LibraryView() {
   const [progresses, setProgresses] = useState({});
   const [refreshing, setRefreshing] = useState(false);
   const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
+  const [sseConnected, setSseConnected] = useState(false);
   const pollRef = useRef(null);
+  const sseRef = useRef(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   useEffect(() => {
     loadFiles();
-    loadLocalData();
-    return () => clearInterval(pollRef.current);
+    loadFolders();
+    loadLocalProgress();
+    const cleanup = connectSSE();
+    return () => {
+      clearInterval(pollRef.current);
+      cleanup?.();
+    };
   }, []);
+
+  // ── SSE: instant push when bot uploads a file ─────────────────────────
+  function connectSSE() {
+    const token = localStorage.getItem('airnotes_token');
+    if (!token) return;
+
+    const BASE_URL = import.meta.env.VITE_API_URL || '/api';
+    const url = `${BASE_URL}/events?token=${encodeURIComponent(token)}`;
+
+    let es;
+    let retryTimer;
+
+    function connect() {
+      if (sseRef.current) sseRef.current.close();
+      es = new EventSource(url);
+      sseRef.current = es;
+
+      es.onopen = () => setSseConnected(true);
+
+      es.onmessage = (e) => {
+        try {
+          const payload = JSON.parse(e.data);
+          if (payload.event === 'new_file' && payload.file) {
+            const file = payload.file;
+            // Prepend to files list immediately — no page reload
+            const current = stateRef.current.files;
+            if (!current.find(f => f.id === file.id)) {
+              actions.setFiles([file, ...current]);
+            }
+            // Update folder assignment if set
+            if (file.folder_id) {
+              actions.setFileAssignments({
+                ...stateRef.current.fileAssignments,
+                [file.id]: file.folder_id,
+              });
+            }
+          }
+        } catch (_) {}
+      };
+
+      es.onerror = () => {
+        setSseConnected(false);
+        es.close();
+        clearTimeout(retryTimer);
+        retryTimer = setTimeout(connect, 5000);
+      };
+    }
+
+    connect();
+
+    return () => {
+      clearTimeout(retryTimer);
+      if (es) es.close();
+    };
+  }
 
   async function loadFiles() {
     actions.setFilesLoading(true);
     try {
       const res = await api.getFiles();
       actions.setFiles(res.files || []);
-      // If the backend is still building the cache, poll until it finishes
       if (res.refresh_in_progress) {
         setBackgroundRefreshing(true);
         startPolling();
@@ -33,6 +96,52 @@ export default function LibraryView() {
     } catch (e) {
       actions.setFilesError(e.message);
     }
+  }
+
+  // ── Load folders + assignments from BACKEND (not local IndexedDB) ─────
+  async function loadFolders() {
+    try {
+      const [foldersRes, assignmentsRes] = await Promise.all([
+        api.getFolders(),
+        api.getFileAssignments(),
+      ]);
+
+      const folders = (foldersRes.folders || []).map(f => ({
+        id: f.id,
+        name: f.name,
+        parentId: f.parent_id || null,
+        createdAt: f.created_at,
+        fileCount: f.file_count || 0,
+      }));
+      actions.setFolders(folders);
+      actions.setFileAssignments(assignmentsRes.assignments || {});
+    } catch (e) {
+      console.error('Load folders failed:', e);
+    }
+  }
+
+  async function loadAssignmentsFromFolders(folders) {
+    const assignMap = {};
+    await Promise.all(
+      folders.map(async folder => {
+        try {
+          const res = await api.getFolderFiles(folder.id);
+          for (const file of (res.files || [])) {
+            assignMap[file.id] = folder.id;
+          }
+        } catch (_) {}
+      })
+    );
+    actions.setFileAssignments(assignMap);
+  }
+
+  async function loadLocalProgress() {
+    const allProgress = await progressStore.getAll();
+    const map = {};
+    for (const p of allProgress) map[p.fileId] = p;
+    setProgresses(map);
+    const recent = await recentStore.getAll(20);
+    actions.setRecent(recent);
   }
 
   function startPolling() {
@@ -46,38 +155,16 @@ export default function LibraryView() {
           clearInterval(pollRef.current);
         }
       } catch (_) {}
-    }, 4000); // poll every 4 seconds
-  }
-
-  async function loadLocalData() {
-    const allProgress = await progressStore.getAll();
-    const map = {};
-    for (const p of allProgress) map[p.fileId] = p;
-    setProgresses(map);
-
-    const folders = await folderStore.getAll();
-    actions.setFolders(folders);
-
-    const assignments = await folderStore.getAllAssignments();
-    const assignMap = {};
-    for (const a of assignments) assignMap[a.fileId] = a.folderId;
-    actions.setFileAssignments(assignMap);
-
-    const recent = await recentStore.getAll(20);
-    actions.setRecent(recent);
+    }, 3000);
   }
 
   async function refresh() {
     setRefreshing(true);
     try {
-      const res = await api.refresh();
-      // New backend returns immediately; poll until done
-      if (res.message && res.message.includes('background')) {
-        setBackgroundRefreshing(true);
-        startPolling();
-      } else {
-        await loadFiles();
-      }
+      await api.refresh();
+      setBackgroundRefreshing(true);
+      startPolling();
+      await loadFolders();
     } catch (e) {
       await loadFiles();
     }
@@ -85,7 +172,6 @@ export default function LibraryView() {
   }
 
   const displayedFiles = useMemo(() => {
-    let files = state.files;
     if (state.activeSection === 'search') return state.searchResults;
     if (state.activeSection === 'recent') {
       const ids = state.recentFiles.map(r => r.fileId);
@@ -93,10 +179,11 @@ export default function LibraryView() {
     }
     if (state.activeSection === 'folder' && state.activeFolderId) {
       const inFolder = Object.entries(state.fileAssignments)
-        .filter(([, fid]) => fid === state.activeFolderId).map(([fileId]) => fileId);
-      return files.filter(f => inFolder.includes(f.id));
+        .filter(([, fid]) => fid === state.activeFolderId)
+        .map(([fileId]) => fileId);
+      return state.files.filter(f => inFolder.includes(f.id));
     }
-    return files;
+    return state.files;
   }, [state.files, state.activeSection, state.searchResults, state.recentFiles, state.activeFolderId, state.fileAssignments]);
 
   const sectionTitle = useMemo(() => {
@@ -111,7 +198,6 @@ export default function LibraryView() {
 
   return (
     <div className="flex-1 overflow-y-auto p-4 md:p-6">
-      {/* Header */}
       <div className="flex items-center justify-between mb-4 md:mb-6">
         <div>
           <h2 className="font-display text-lg md:text-xl font-semibold text-paper-100">{sectionTitle}</h2>
@@ -119,11 +205,16 @@ export default function LibraryView() {
             <p className="text-ink-500 text-xs md:text-sm">
               {displayedFiles.length} {displayedFiles.length === 1 ? 'document' : 'documents'}
             </p>
-            {/* Background refresh indicator */}
             {backgroundRefreshing && (
               <span className="flex items-center gap-1 text-xs text-amber-400">
                 <Loader2 size={11} className="animate-spin" />
                 syncing…
+              </span>
+            )}
+            {sseConnected && !backgroundRefreshing && (
+              <span className="flex items-center gap-1 text-xs text-emerald-400" title="Live — bot uploads appear instantly">
+                <Zap size={11} className="fill-emerald-400" />
+                live
               </span>
             )}
           </div>
@@ -144,7 +235,6 @@ export default function LibraryView() {
         </div>
       </div>
 
-      {/* Loading skeletons */}
       {state.filesLoading && (
         <div className={state.viewMode === 'grid'
           ? 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 md:gap-4'
@@ -153,7 +243,6 @@ export default function LibraryView() {
         </div>
       )}
 
-      {/* Error */}
       {state.filesError && !state.filesLoading && (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <AlertCircle size={32} className="text-red-400 mb-3" />
@@ -163,27 +252,27 @@ export default function LibraryView() {
         </div>
       )}
 
-      {/* Empty (but cache may still be loading) */}
       {!state.filesLoading && !state.filesError && displayedFiles.length === 0 && (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <BookOpen size={40} className="text-ink-700 mb-4" />
           <p className="text-ink-400 font-medium mb-1">
             {backgroundRefreshing
-              ? 'Loading your PDFs from Telegram…'
-              : state.activeSection === 'folder' ? 'This folder is empty' : 'No PDFs found'}
+              ? 'Loading your files from Telegram…'
+              : state.activeSection === 'folder'
+                ? 'This folder is empty'
+                : 'No files found'}
           </p>
           <p className="text-ink-600 text-sm">
             {backgroundRefreshing
-              ? 'This only happens once. Files will appear automatically.'
+              ? 'Files will appear automatically.'
               : state.activeSection === 'folder'
-                ? 'Assign PDFs to this folder from the library'
-                : 'Add PDF files to your Telegram channel'}
+                ? 'Upload to this folder via bot with /set_folder, or assign files here from the library'
+                : 'Add PDF or video files to your Telegram channel'}
           </p>
           {backgroundRefreshing && <Loader2 size={20} className="animate-spin text-ink-600 mt-4" />}
         </div>
       )}
 
-      {/* Grid */}
       {!state.filesLoading && !state.filesError && displayedFiles.length > 0 && state.viewMode === 'grid' && (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 md:gap-4 animate-fade-in">
           {displayedFiles.map(file => (
@@ -192,7 +281,6 @@ export default function LibraryView() {
         </div>
       )}
 
-      {/* List */}
       {!state.filesLoading && !state.filesError && displayedFiles.length > 0 && state.viewMode === 'list' && (
         <div className="space-y-0.5 animate-fade-in">
           <div className="hidden md:flex items-center gap-4 px-4 py-2 text-[11px] font-medium text-ink-600 uppercase tracking-wider">
