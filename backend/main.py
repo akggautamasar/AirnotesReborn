@@ -6,10 +6,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt as pyjwt
+import uuid
 
 import config
 from utils.clients import initialize_clients, get_client
@@ -21,7 +22,7 @@ logger = Logger(__name__)
 file_cache: Dict[str, Dict] = {}
 security = HTTPBearer(auto_error=False)
 
-# ─── Folder system (persisted as JSON) ─────────────────────────────────
+# ─── Folder system ──────────────────────────────────────────────────────────
 FOLDERS_FILE = Path("./cache/folders.json")
 FOLDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -40,7 +41,25 @@ def _load_folders():
         except Exception as e:
             logger.warning(f"Could not load folders: {e}")
 
-# ─── Cache refresh state ────────────────────────────────────────────────
+# ─── SSE: instant file update broadcast ────────────────────────────────────
+_sse_queues: list = []
+
+def notify_new_file(file_entry: dict):
+    """Call after adding any file to file_cache — pushes to all browser tabs instantly."""
+    data = json.dumps({"event": "new_file", "file": file_entry})
+    dead = []
+    for q in _sse_queues:
+        try:
+            q.put_nowait(data)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        try:
+            _sse_queues.remove(q)
+        except ValueError:
+            pass
+
+# ─── Cache refresh ──────────────────────────────────────────────────────────
 _refresh_lock = asyncio.Lock()
 _refresh_in_progress = False
 _last_refresh: datetime = None
@@ -123,8 +142,20 @@ async def refresh_file_cache():
         try:
             client = get_client()
             new_cache: Dict[str, Dict] = {}
+
+            # ── Find upper bound ──────────────────────────────────────────
+            # Start from DATABASE_BACKUP_MSG_ID but also consider the highest
+            # message_id currently in file_cache (bot-uploaded files may be
+            # above the probe range).
             anchor_id = config.DATABASE_BACKUP_MSG_ID
             upper_id = anchor_id
+
+            # Factor in any files already in cache (bot uploads survive refresh)
+            if file_cache:
+                max_cached_id = max(v.get("message_id", 0) for v in file_cache.values())
+                if max_cached_id > upper_id:
+                    upper_id = max_cached_id
+
             for probe_ids in [
                 list(range(anchor_id + 1, anchor_id + 501, 50)),
                 list(range(upper_id + 1, upper_id + 101)),
@@ -136,6 +167,7 @@ async def refresh_file_cache():
                             upper_id = m.id
                 except Exception:
                     pass
+
             start_id = max(1, upper_id - FULL_SCAN_LIMIT)
             for batch_start in range(upper_id, start_id - 1, -200):
                 batch_end = max(batch_start - 199, start_id)
@@ -164,10 +196,10 @@ async def refresh_file_cache():
                         "caption": message.caption or "", "type": ftype, "mime": mime,
                     }
                 await asyncio.sleep(0.1)
-            # CRITICAL FIX: update in-place, never replace the dict object.
-            # bot_handler holds a reference to this same dict. Doing
-            # file_cache = new_cache breaks that reference so bot uploads
-            # go into a stale dict that list_files never reads.
+
+            # ── CRITICAL: update in-place so bot_handler reference stays valid ──
+            # Never do `file_cache = new_cache` — that breaks the reference
+            # bot_handler holds. Instead mutate the same dict object.
             file_cache.clear()
             file_cache.update(new_cache)
             _last_refresh = datetime.utcnow()
@@ -187,7 +219,7 @@ async def _periodic_refresh():
         await refresh_file_cache()
 
 
-# ── Auth ────────────────────────────────────────────────────────────────
+# ── Auth ─────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 @app.head("/health")
@@ -210,7 +242,7 @@ async def verify(user=Depends(require_auth)):
     return {"valid": True}
 
 
-# ── Files ───────────────────────────────────────────────────────────────
+# ── Files ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/files")
 async def list_files(type: str = None, folder_id: str = None, user=Depends(require_auth)):
@@ -234,12 +266,6 @@ async def stream_file(file_id: str, request: Request, user=Depends(require_auth)
     info = file_cache[file_id]
     return await media_streamer(config.STORAGE_CHANNEL, info["message_id"], info["name"], request)
 
-@app.options("/api/files/{file_id}/stream")
-async def stream_options(file_id: str):
-    return Response(headers={"Access-Control-Allow-Origin": "*",
-                              "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-                              "Access-Control-Allow-Headers": "Authorization, Range"})
-
 @app.delete("/api/files/{file_id}")
 async def delete_file(file_id: str, user=Depends(require_auth)):
     if file_id not in file_cache:
@@ -247,13 +273,13 @@ async def delete_file(file_id: str, user=Depends(require_auth)):
     info = file_cache[file_id]
     try:
         client = get_client()
-        await client.delete_messages(config.STORAGE_CHANNEL, info["message_id"])
-        del file_cache[file_id]
-        folder_db["file_assignments"].pop(file_id, None)
-        _save_folders()
-        return {"success": True}
+        await client.delete_messages(config.STORAGE_CHANNEL, [info["message_id"]])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+        logger.warning(f"Could not delete Telegram message: {e}")
+    del file_cache[file_id]
+    folder_db["file_assignments"].pop(file_id, None)
+    _save_folders()
+    return {"success": True}
 
 @app.patch("/api/files/{file_id}/rename")
 async def rename_file(file_id: str, request: Request, user=Depends(require_auth)):
@@ -263,10 +289,6 @@ async def rename_file(file_id: str, request: Request, user=Depends(require_auth)
     name = body.get("name", "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name required")
-    info = file_cache[file_id]
-    if "." not in name:
-        ext = Path(info["name"]).suffix or (".pdf" if info.get("type") == "pdf" else "")
-        name += ext
     file_cache[file_id]["name"] = name
     return {"success": True, "file": file_cache[file_id]}
 
@@ -277,26 +299,16 @@ async def copy_file(file_id: str, user=Depends(require_auth)):
     info = file_cache[file_id]
     try:
         client = get_client()
-        orig = await client.get_messages(config.STORAGE_CHANNEL, info["message_id"])
-        copied = await orig.copy(config.STORAGE_CHANNEL)
-        media = getattr(copied, "document", None) or getattr(copied, "video", None)
-        if not media:
-            raise HTTPException(status_code=500, detail="Copy failed")
+        copied = await client.copy_message(config.STORAGE_CHANNEL, config.STORAGE_CHANNEL, info["message_id"])
         new_key = f"msg_{copied.id}"
-        stem = Path(info["name"]).stem
-        ext = Path(info["name"]).suffix
         file_cache[new_key] = {
-            "id": new_key, "message_id": copied.id,
-            "name": f"{stem} (copy){ext}", "size": info["size"],
-            "date": copied.date.timestamp() if copied.date else info["date"],
-            "caption": info["caption"], "type": info.get("type", "pdf"),
-            "mime": info.get("mime", ""),
+            "id": new_key, "message_id": copied.id, "name": info["name"],
+            "size": info["size"], "date": datetime.utcnow().timestamp(),
+            "caption": info.get("caption", ""), "type": info["type"], "mime": info.get("mime", ""),
         }
         return {"success": True, "file": file_cache[new_key]}
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/files/{file_id}/move")
 async def move_file(file_id: str, request: Request, user=Depends(require_auth)):
@@ -314,25 +326,23 @@ async def move_file(file_id: str, request: Request, user=Depends(require_auth)):
     return {"success": True, "file_id": file_id, "folder_id": folder_id}
 
 @app.get("/api/search")
-async def search(q: str = "", type: str = None, user=Depends(require_auth)):
-    if not q:
-        return {"files": []}
-    query = q.lower()
+async def search_files(q: str = "", type: str = None, user=Depends(require_auth)):
+    q = q.lower().strip()
     results = [f for f in file_cache.values()
-               if query in f["name"].lower() or query in f["caption"].lower()]
+               if q in f["name"].lower() or q in f.get("caption", "").lower()]
     if type in ("pdf", "video"):
         results = [f for f in results if f.get("type") == type]
-    return {"files": results, "query": q}
+    results.sort(key=lambda f: f["date"], reverse=True)
+    return {"results": results, "total": len(results)}
 
 @app.post("/api/files/refresh")
-async def force_refresh(user=Depends(require_auth)):
-    if _refresh_in_progress:
-        return {"message": "Refresh already in progress", "files_cached": len(file_cache)}
-    asyncio.create_task(refresh_file_cache())
-    return {"message": "Refresh started in background", "files_cached": len(file_cache)}
+async def trigger_refresh(user=Depends(require_auth)):
+    if not _refresh_in_progress:
+        asyncio.create_task(refresh_file_cache())
+    return {"message": "Refresh started in background", "refresh_in_progress": True}
 
 
-# ── Folders ─────────────────────────────────────────────────────────────
+# ── Folders ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/folders")
 async def list_folders(user=Depends(require_auth)):
@@ -347,8 +357,7 @@ async def create_folder_api(request: Request, user=Depends(require_auth)):
     body = await request.json()
     name = body.get("name", "").strip()
     if not name:
-        raise HTTPException(status_code=400, detail="Folder name required")
-    import uuid
+        raise HTTPException(status_code=400, detail="Name required")
     folder_id = str(uuid.uuid4())[:8]
     folder = {"id": folder_id, "name": name, "parent_id": body.get("parent_id"),
               "created_at": datetime.utcnow().isoformat()}
@@ -390,35 +399,18 @@ async def get_folder_files(folder_id: str, user=Depends(require_auth)):
     files.sort(key=lambda f: f["date"], reverse=True)
     return {"files": files, "folder": folder_db["folders"][folder_id]}
 
-# ─── SSE: instant file update stream ───────────────────────────────────────────
-import asyncio
-from fastapi.responses import StreamingResponse
+@app.get("/api/assignments")
+async def get_all_assignments(user=Depends(require_auth)):
+    """Return all file→folder assignments in one call."""
+    return {"assignments": folder_db.get("file_assignments", {})}
 
-# All active SSE queues — one per connected client
-_sse_queues: list[asyncio.Queue] = []
 
-def notify_new_file(file_entry: dict):
-    """Call this whenever a new file is added to file_cache (from bot handler)."""
-    import json as _json
-    data = _json.dumps({"event": "new_file", "file": file_entry})
-    dead = []
-    for q in _sse_queues:
-        try:
-            q.put_nowait(data)
-        except asyncio.QueueFull:
-            dead.append(q)
-    for q in dead:
-        try:
-            _sse_queues.remove(q)
-        except ValueError:
-            pass
+# ── SSE: instant push to browser ─────────────────────────────────────────────
 
 @app.get("/api/events")
 async def sse_events(request: Request, token: str = None):
-    """Server-Sent Events endpoint — pushes new files to all connected clients instantly."""
-    # Auth via query param (EventSource can't set headers)
+    """Server-Sent Events — pushes new files to all connected clients instantly."""
     if not token:
-        from fastapi import HTTPException
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
         verify_jwt(token)
@@ -430,7 +422,6 @@ async def sse_events(request: Request, token: str = None):
 
     async def event_generator():
         try:
-            # Send a keepalive comment every 25s so proxies don't close the connection
             yield ": keepalive\n\n"
             while True:
                 try:
@@ -457,8 +448,3 @@ async def sse_events(request: Request, token: str = None):
             "Connection": "keep-alive",
         },
     )
-
-@app.get("/api/assignments")
-async def get_all_assignments(user=Depends(require_auth)):
-    """Return all file→folder assignments in one call."""
-    return {"assignments": folder_db.get("file_assignments", {})}
