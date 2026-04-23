@@ -68,8 +68,9 @@ export default function PDFReader() {
   useEffect(() => {
     if (!file) return;
     loadPDF();
-    const savedPage = progressStore.get(file.id);
-    if (savedPage) setCurrentPage(parseInt(savedPage) || 1);
+    progressStore.get(file.id).then(saved => {
+      if (saved?.currentPage) setCurrentPage(parseInt(saved.currentPage) || 1);
+    });
 
     const handleKey = (e) => {
       if (e.key === 'Escape') { if (!document.fullscreenElement) actions.closeFile(); }
@@ -99,8 +100,8 @@ export default function PDFReader() {
       setNumPages(doc.numPages);
       setLoading(false);
 
-      const bm = bookmarkStore.getAll(file.id);
-      setIsBookmarked(bm.includes(currentPage));
+      const bm = await bookmarkStore.getByFile(file.id);
+      setIsBookmarked(bm.some(b => b.page === currentPage));
     } catch (e) {
       setError(`Failed to load PDF: ${e.message}`);
       setLoading(false);
@@ -198,9 +199,10 @@ export default function PDFReader() {
         if (el && el.offsetTop <= scrollTop && el.offsetTop + el.offsetHeight >= scrollTop) {
           setCurrentPage(p);
           setPageInput(String(p));
-          if (file) progressStore.set(file.id, p);
-          const bm = bookmarkStore.getAll(file?.id);
-          setIsBookmarked(bm.includes(p));
+          if (file) progressStore.save(file.id, p, numPages);
+          bookmarkStore.getByFile(file?.id).then(bm => {
+            setIsBookmarked(bm.some(b => b.page === p));
+          });
           break;
         }
       }

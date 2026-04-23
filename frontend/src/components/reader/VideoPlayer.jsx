@@ -291,11 +291,13 @@ export default function VideoPlayer() {
           </div>
         )}
 
-        {/* Tap zones hint — shown briefly on load */}
-        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 pointer-events-none
-                        text-white/30 text-xs text-center hidden sm:block">
-          ← {SEEK_SECS}s &nbsp;|&nbsp; tap to play/pause &nbsp;|&nbsp; {SEEK_SECS}s →
-        </div>
+        {/* Tap zones hint — only shown when controls are visible */}
+        {showControls && (
+          <div className="absolute bottom-20 left-1/2 -translate-x-1/2 pointer-events-none
+                          text-white/30 text-xs text-center hidden sm:block">
+            ← {SEEK_SECS}s &nbsp;|&nbsp; tap to play/pause &nbsp;|&nbsp; {SEEK_SECS}s →
+          </div>
+        )}
       </div>
 
       {/* ── Bottom controls ── */}
@@ -375,12 +377,14 @@ export default function VideoPlayer() {
           </button>
         </div>
 
-        {/* Mobile hint: tap zones */}
-        <div className="flex justify-between text-white/25 text-xs mt-2 sm:hidden px-2">
-          <span>← {SEEK_SECS}s</span>
-          <span>tap = play/pause</span>
-          <span>{SEEK_SECS}s →</span>
-        </div>
+        {/* Mobile hint: tap zones — only when controls visible */}
+        {false && (
+          <div className="flex justify-between text-white/25 text-xs mt-2 sm:hidden px-2">
+            <span>← {SEEK_SECS}s</span>
+            <span>tap = play/pause</span>
+            <span>{SEEK_SECS}s →</span>
+          </div>
+        )}
       </div>
     </div>
   );
