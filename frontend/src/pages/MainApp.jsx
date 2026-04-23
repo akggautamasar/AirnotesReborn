@@ -51,19 +51,9 @@ export default function MainApp() {
   }
 
   async function loadFileAssignments() {
-    // We don't have a dedicated /api/assignments endpoint — we re-derive from
-    // all files and their folder assignments by fetching with no filter, then
-    // use folder endpoint to get per-folder file IDs.
     try {
-      const foldersData = await api.getFolders();
-      const assignments = {};
-      for (const folder of (foldersData.folders || [])) {
-        const fd = await api.getFolderFiles(folder.id);
-        for (const file of (fd.files || [])) {
-          assignments[file.id] = folder.id;
-        }
-      }
-      actions.setFileAssignments(assignments);
+      const data = await api.getFileAssignments();
+      actions.setFileAssignments(data.assignments || {});
     } catch (e) {
       // non-critical
     }
