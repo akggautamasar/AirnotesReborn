@@ -115,7 +115,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
 
 
 async def refresh_file_cache():
-    global file_cache, _refresh_in_progress, _last_refresh
+    global _refresh_in_progress, _last_refresh
     if _refresh_in_progress:
         return
     async with _refresh_lock:
@@ -164,7 +164,12 @@ async def refresh_file_cache():
                         "caption": message.caption or "", "type": ftype, "mime": mime,
                     }
                 await asyncio.sleep(0.1)
-            file_cache = new_cache
+            # CRITICAL FIX: update in-place, never replace the dict object.
+            # bot_handler holds a reference to this same dict. Doing
+            # file_cache = new_cache breaks that reference so bot uploads
+            # go into a stale dict that list_files never reads.
+            file_cache.clear()
+            file_cache.update(new_cache)
             _last_refresh = datetime.utcnow()
             pdfs = sum(1 for f in file_cache.values() if f["type"] == "pdf")
             videos = sum(1 for f in file_cache.values() if f["type"] == "video")
